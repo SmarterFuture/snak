@@ -1,13 +1,12 @@
-use std::collections::LinkedList;
 use crate::backend;
-
+use std::collections::LinkedList;
 
 #[derive(Debug)]
 pub enum Dir {
     UP,
     DOWN,
     LEFT,
-    RIGHT
+    RIGHT,
 }
 
 impl Dir {
@@ -42,13 +41,12 @@ impl Snak {
         let head: usize = *self._body.front().unwrap_or(&self._pit.middle());
         let max = self._pit.flatten();
         let row: usize = head / self._pit.cols * self._pit.cols;
-        self._body.push_front(
-            match self.dir {
-                Dir::UP => (head + max - self._pit.cols) % max,
-                Dir::DOWN => (head + max + self._pit.cols) % max,
-                Dir::LEFT => row + (head + self._pit.cols - 2) % self._pit.cols,
-                Dir::RIGHT => row + (head + 2) % self._pit.cols,
-            });
+        self._body.push_front(match self.dir {
+            Dir::UP => (head + max - self._pit.cols) % max,
+            Dir::DOWN => (head + max + self._pit.cols) % max,
+            Dir::LEFT => row + (head + self._pit.cols - 2) % self._pit.cols,
+            Dir::RIGHT => row + (head + 2) % self._pit.cols,
+        });
         *self._body.front().unwrap()
     }
 
@@ -56,8 +54,12 @@ impl Snak {
         Snak {
             dir: Dir::UP,
             _body: LinkedList::from([pit.middle()]),
-            _pit: pit
+            _pit: pit,
         }
+    }
+
+    pub fn state(&self) -> (&usize, &usize) {
+        (self._body.front().unwrap(), self._body.back().unwrap())
     }
 
     pub fn tailoff(&mut self) -> usize {
