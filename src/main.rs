@@ -1,95 +1,138 @@
-use std::io::{stdin, Read};
-use std::process;
-use pit::Collision;
-use raw_tty::GuardMode;
+use std::{
+    env, io::{self, Read}, sync::mpsc, thread, time::Duration
+};
+
 use rand::thread_rng;
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
+use raw_tty::IntoRawMode;
 
-mod snak;
+use crate::backend::{RenderTarget, Size, TermScreen, TermStatusLine};
+
 mod backend;
-mod pit;
+mod snake;
 
-fn main() {
+fn play_snake(w: usize, h: usize) -> Result<(), io::Error> {
+    let (lock_tx, lock_rx) = mpsc::channel::<bool>();
+    let (stop_tx, stop_rx) = mpsc::channel::<bool>();
+    let (dir_tx, dir_rx) = mpsc::channel::<snake::Dir>();
 
-    let (ltx, lrx) = mpsc::channel();
-    let (tx, rx) = mpsc::channel();
-    
-    let mut rng = thread_rng();
-    let size = backend::get_size().unwrap();
+    let rng = thread_rng();
 
-    let mut stdin = stdin().guard_mode().unwrap();
-    stdin.set_raw_mode().unwrap();
+    let mut snake = snake::Snake::new(Size::new(w, h), rng);
+    let mut screen = TermScreen::new(w, h);
+    let mut statusline = TermStatusLine::new(w);
+    screen.init()?;
+    statusline.init()?;
 
-    let mut pit = pit::Pit::new(size);
-    pit.empty();
-    pit.st_screen();
-    let mut snak = snak::Snak::new(pit.get_size());
+    let diff_rate = [150, 145, 140, 135, 130];
+    let mut sleep;
 
-    let mut ticks: u16 = 0;
-    let mut score: u16 = 0;
-    let mut lock: bool = true;
-    let mut speed: u8 = 120;
-    
     // auxiliary thread here -> tracking user inputs
-    thread::spawn(move || {
-        for i in stdin.bytes() {
-            // kill switch
-            if i.as_ref().is_ok_and(|i| i == &3) {
-                println!("\r\x1b[?25h");
-                break;
-            }
-            // start game (small e)
-            if i.as_ref().is_ok_and(|i| i == &101) { ltx.send(true).unwrap(); }
+    let input = thread::spawn(move || {
+        let mut raw_stdin = io::stdin().into_raw_mode().unwrap();
+        let mut buf = [0u8; 1];
 
-            // arrows or capital A, B, C, D 
-            let dir = match i.unwrap() {
-                65 => Some(snak::Dir::UP),
-                66 => Some(snak::Dir::DOWN),
-                67 => Some(snak::Dir::RIGHT),
-                68 => Some(snak::Dir::LEFT),
+        loop {
+            raw_stdin.read_exact(&mut buf).unwrap();
+
+            let dir = match buf[0] {
+                // kill switch
+                3 | b'q' => {
+                    stop_tx.send(true).unwrap();
+                    break;
+                }
+                // start game (small e)
+                b'e' => {
+                    lock_tx.send(true).unwrap();
+                    None
+                }
+                // arrows or capital A, B, C, D
+                b'A' => Some(snake::Dir::Up),
+                b'B' => Some(snake::Dir::Down),
+                b'C' => Some(snake::Dir::Right),
+                b'D' => Some(snake::Dir::Left),
                 _ => None,
             };
+
             // send change in direction to main thread
-            if let Some(x) = dir { tx.send(x).unwrap(); }
-        };
-        // will kill the game
-        process::exit(0x0);
-    }); 
+            if let Some(x) = dir {
+                dir_tx.send(x).unwrap();
+            }
+        }
+    });
     
-    // main thread here -> moves snake around
-    loop {
-        if lrx.try_recv().is_ok() {
-            lock = false;
-            pit.empty();
-            pit.next_munch(&mut rng);
-        };
-        if lock { continue; };
+    // this should have been calculated inside the TermScreen as user shouldn't be able to guess
+    // the width of text after rendering, but well...
+    let mid_x = w;
+    let mid_y = h / 2;
+    screen.render_text(mid_x - 3, mid_y, "Snake!".to_string())?;
+    screen.render_text(mid_x - 9, mid_y + 1, "To start, press e!".to_string())?;
 
-        if let Ok(x) = rx.try_recv() { snak.change_dir(x) };
-
-        let pos = snak.munch();
-        match pit.is_collision(pos) {
-            Collision::No => pit.set(pos, Some(snak.tailoff())),
-            Collision::Munch => {
-                pit.set(pos, None);
-                pit.next_munch(&mut rng);
-                score += 1;
-                speed = speed.checked_sub(2).unwrap_or(0);
-            },
-            Collision::Ded => {
-                pit.kill_snak(snak.ded());
-                break;
-            },
-        };
-
-        ticks += 1;
-        pit.set_status(score, ticks);
-        pit.blit();
-        thread::sleep(Duration::from_millis(80 + speed as u64))
+    // waiting for unlock
+    if lock_rx.recv().is_ok() {
+        snake.start();
     }
 
-    loop {};
+    // main thread here -> moves snake around
+    loop {
+        if stop_rx.try_recv().is_ok() {
+            break;
+        }
 
+        if let Ok(x) = dir_rx.try_recv() {
+            snake.change_dir(x);
+        }
+
+        let r_diff = snake.tick_move();
+        snake.draw_snake_to(&mut screen)?;
+        snake.draw_status_to(&mut statusline)?;
+
+        if let Ok(diff) = r_diff {
+            sleep = *diff_rate.get(diff).unwrap_or(&60);
+        } else {
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(sleep))
+    }
+
+    screen.render_text(mid_x - 7, mid_y, "You have died!".to_string())?;
+    screen.render_text(mid_x - 8, mid_y + 1, "To exit press q!".to_string())?;
+
+    input.join().unwrap();
+    
+    Ok(())
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    let mut w = 20;
+    let mut h = 20;
+
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-w" | "--width" => {
+                if let Some(val) = iter.next() {
+                    w = val.parse().unwrap();
+                    if !(0..=100).contains(&w) {
+                        eprintln!("Width is not in range [0, 100]!");
+                        return;
+                    }
+                }
+            }
+            "-h" | "--height" => {
+                if let Some(val) = iter.next() {
+                    h = val.parse().unwrap();
+                    if !(0..=100).contains(&h) {
+                        eprintln!("Height is not in range [0, 100]!");
+                        return;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    play_snake(w, h).unwrap();
 }
