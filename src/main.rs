@@ -1,14 +1,22 @@
 use std::{
-    env, io::{self, Read}, sync::mpsc, thread, time::Duration
+    env,
+    io::{self, Read},
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 
 use rand::thread_rng;
 use raw_tty::IntoRawMode;
 
-use crate::backend::{RenderTarget, Size, TermScreen, TermStatusLine};
+use crate::{
+    backend::{Quad, RenderTarget, Size},
+    term_display::{TermScreen, TermStatusLine},
+};
 
 mod backend;
 mod snake;
+mod term_display;
 
 fn play_snake(w: usize, h: usize) -> Result<(), io::Error> {
     let (lock_tx, lock_rx) = mpsc::channel::<bool>();
@@ -59,13 +67,16 @@ fn play_snake(w: usize, h: usize) -> Result<(), io::Error> {
             }
         }
     });
-    
-    // this should have been calculated inside the TermScreen as user shouldn't be able to guess
-    // the width of text after rendering, but well...
-    let mid_x = w;
+
+    let mid_x = w / 2;
     let mid_y = h / 2;
-    screen.render_text(mid_x - 3, mid_y, "Snake!".to_string())?;
-    screen.render_text(mid_x - 9, mid_y + 1, "To start, press e!".to_string())?;
+    screen.render_text(mid_x, mid_y, "Snake!".to_string(), Quad::Center)?;
+    screen.render_text(
+        mid_x,
+        mid_y + 1,
+        "To start, press e!".to_string(),
+        Quad::Center,
+    )?;
 
     // waiting for unlock
     if lock_rx.recv().is_ok() {
@@ -95,11 +106,16 @@ fn play_snake(w: usize, h: usize) -> Result<(), io::Error> {
         thread::sleep(Duration::from_millis(sleep))
     }
 
-    screen.render_text(mid_x - 7, mid_y, "You have died!".to_string())?;
-    screen.render_text(mid_x - 8, mid_y + 1, "To exit press q!".to_string())?;
+    screen.render_text(mid_x, mid_y, "You have died!".to_string(), Quad::Center)?;
+    screen.render_text(
+        mid_x,
+        mid_y + 1,
+        "To exit press q!".to_string(),
+        Quad::Center,
+    )?;
 
     input.join().unwrap();
-    
+
     Ok(())
 }
 
